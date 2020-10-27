@@ -1,0 +1,246 @@
+subcripiton=<your subcripiton ID>
+
+
+
+#Login to Azure Cloud
+az login 
+
+#If you have more than one subcription, you can set intended subcription here
+az account set --subscription "$subcripiton"
+
+az group create --name DemoRG --location westus
+#**************************************************
+#Create the Azure-side resources
+#**************************************************
+
+#1. Create the 'Azure-VNet-1' virtual network and the Services subnet.
+az network vnet create \
+    --resource-group DemoRG \
+    --name Azure-VNet-1 \
+    --address-prefix 10.0.0.0/16 \
+    --subnet-name Services \
+    --subnet-prefix 10.0.0.0/24
+
+#2. Create GatewaySubnet subnet to 'Azure-VNet-1'.
+az network vnet subnet create \
+    --resource-group DemoRG \
+    --vnet-name Azure-VNet-1 \
+    --address-prefix 10.0.255.0/27 \
+    --name GatewaySubnet
+
+ #3. Create the 'LNG-HQ-Network' local network gateway.
+
+ az network local-gateway create \
+    --resource-group DemoRG \
+    --gateway-ip-address 94.0.252.160 \
+    --name LNG-HQ-Network \
+    --local-address-prefixes 172.16.0.0/16
+#This gateway represents the on-premises network that you're connecting to. 
+#The IP address specified as the remote gateway (which is the simulated on-premises network) will need to be updated 
+#later because it doesn't exist yet in our scenario.
+
+#*****************************************************************
+#Create the simulated on-premises network and supporting resources
+#*****************************************************************
+
+#1.Create the 'HQ-Network' virtual network and the Applications subnet.
+az network vnet create \
+    --resource-group DemoRG \
+    --name HQ-Network \
+    --address-prefix 172.16.0.0/16 \
+    --subnet-name Applications \
+    --subnet-prefix 172.16.0.0/24
+
+
+ #2. Add GatewaySubnet to HQ-Network.
+
+az network vnet subnet create \
+    --resource-group DemoRG \
+    --address-prefix 172.16.255.0/27 \
+    --name GatewaySubnet \
+    --vnet-name HQ-Network
+
+ #3. Create the LNG-Azure-VNet-1 local network gateway.
+
+ az network local-gateway create \
+    --resource-group DemoRG \
+    --gateway-ip-address 94.0.252.160 \
+    --name LNG-Azure-VNet-1 \
+    --local-address-prefixes 10.0.0.0/16   
+
+#This gateway describes the Azure network that you're connecting to. 
+#You'll update the IP address specified as the remote gateway (which is in Azure) later.
+
+
+#Verify the topology
+
+az network vnet list --output table
+
+
+
+#verify that the local network gateways have been successfully created.
+
+az network local-gateway list \
+    --resource-group DemoRG \
+    --output table
+
+
+#***********************************************************************************************************************
+#**************************************************
+#Create the Azure-side VPN gateway    
+#**************************************************
+#To Create the VPN gateway for the Azure end of the connection. 
+#It can take up to 45 minutes to create a virtual network gateway. To save time,
+#we will use Azure CLI commands with the --no-wait parameter. 
+#This parameter us to create both virtual network gateways simultaneously to minimize 
+#the overall time required to create these resources.
+
+
+#1. Create the PIP-VNG-Azure-VNet-1 public IP address.
+az network public-ip create \
+    --resource-group DemoRG \
+    --name PIP-VNG-Azure-VNet-1 \
+    --allocation-method Dynamic
+
+#2. Create the VNG-Azure-VNet-1 virtual network gateway.
+az network vnet-gateway create \
+    --resource-group DemoRG \
+    --name VNG-Azure-VNet-1 \
+    --public-ip-address PIP-VNG-Azure-VNet-1 \
+    --vnet Azure-VNet-1 \
+    --gateway-type Vpn \
+    --vpn-type RouteBased \
+    --sku VpnGw1 \
+    --no-wait
+
+#**************************************************
+#Create the on-premises VPN gateway
+#**************************************************    
+
+#1. Create the PIP-VNG-HQ-Network public IP address.
+
+az network public-ip create \
+    --resource-group DemoRG \
+    --name PIP-VNG-HQ-Network \
+    --allocation-method Dynamic
+
+#2. Create the VNG-HQ-Network virtual network gateway.  
+
+az network vnet-gateway create \
+    --resource-group DemoRG \
+    --name VNG-HQ-Network \
+    --public-ip-address PIP-VNG-HQ-Network \
+    --vnet HQ-Network \
+    --gateway-type Vpn \
+    --vpn-type RouteBased \
+    --sku VpnGw1 \
+    --no-wait
+
+
+ #3. Gateway creation will take several minutes to complete. To monitor the progress of the gateway creation, 
+ #run the following command  
+ watch -d -n 5 az network vnet-gateway list \
+    --resource-group DemoRG \
+    --output table 
+
+#**************************************************
+ #Update the local network gateway IP references   
+#************************************************** 
+
+#NOTE: Your virtual network gateways must be successfully deployed before you continue the excerise 
+
+#you'll update the remote gateway IP address references that are defined in the local network gateways. 
+#You can't update the local network gateways until you've created the VPN gateways and an IPv4 address is assigned to and 
+#associated with them.
+
+#Check whether both virtual network gateways have been created
+
+az network vnet-gateway list \
+    --resource-group DemoRG \
+    --query "[?provisioningState=='Succeeded']" \
+    --output table
+
+
+#1. Cloud Shell to retrieve the IPv4 address assigned to PIP-VNG-Azure-VNet-1 and store it in a variable.   
+PIPVNGAZUREVNET1=$(az network public-ip show \
+    --resource-group DemoRG \
+    --name PIP-VNG-Azure-VNet-1 \
+    --query "[ipAddress]" \
+    --output tsv)
+
+# 2. Update the LNG-Azure-VNet-1 local network gateway so that it points to the public IP address attached to 
+#     the VNG-Azure-VNet-1 virtual network gateway.
+
+az network local-gateway update \
+    --resource-group DemoRG \
+    --name LNG-Azure-VNet-1 \
+    --gateway-ip-address $PIPVNGAZUREVNET1
+
+#3. Retrieve the IPv4 address assigned to PIP-VNG-HQ-Network and store it in a variable.    
+PIPVNGHQNETWORK=$(az network public-ip show \
+    --resource-group DemoRG \
+    --name PIP-VNG-HQ-Network \
+    --query "[ipAddress]" \
+    --output tsv)
+
+ #5. update the LNG-HQ-Network local network gateway so that it points to the public IP address attached 
+  #to the VNG-HQ-Network virtual network gateway.
+  az network local-gateway update \
+    --resource-group DemoRG \
+    --name LNG-HQ-Network \
+    --gateway-ip-address $PIPVNGHQNETWORK
+
+#**************************************************
+ #Create the connections      
+#**************************************************
+
+#1. Create the shared key to use for the connections. The pre-shared key is a string of printable ASCII characters no 
+#longer than 128 characters. You'll use this pre-shared key on both connections.
+
+#Replace <shared key> with a text string to use for the IPSec pre-shared key.
+SHAREDKEY=<shared key>
+
+# 2. Create a connection from VNG-Azure-VNet-1 to LNG-HQ-Network.
+
+az network vpn-connection create \
+    --resource-group DemoRG \
+    --name Azure-VNet-1-To-HQ-Network \
+    --vnet-gateway1 VNG-Azure-VNet-1 \
+    --shared-key $SHAREDKEY \
+    --local-gateway2 LNG-HQ-Network
+
+
+ #3. This connection would normally be created from your on-premises device. 
+#    Run this command in Cloud Shell to create a connection from VNG-HQ-Network to LNG-Azure-VNet-1.   
+az network vpn-connection create \
+    --resource-group DemoRG \
+    --name HQ-Network-To-Azure-VNet-1  \
+    --vnet-gateway1 VNG-HQ-Network \
+    --shared-key $SHAREDKEY \
+    --local-gateway2 LNG-Azure-VNet-1
+
+#We now finished the configuration of the site-to-site connection. This may take a few minutes, 
+#but the tunnels should automatically connect and become active.     
+
+#**********************************
+#Verification steps
+#**********************************
+
+#Let's confirm that the VPN tunnels are connected.
+
+#1. Run the following command to confirm that Azure-VNet-1-To-HQ-Network is connected.
+az network vpn-connection show \
+    --resource-group DemoRG \
+    --name Azure-VNet-1-To-HQ-Network  \
+    --output table \
+    --query '{Name:name,ConnectionStatus:connectionStatus}'
+
+
+# lets confirm the corresponding HQ-Network-To-Azure-VNet-1 connection is also established. 
+az network vpn-connection show \
+    --resource-group DemoRG \
+    --name HQ-Network-To-Azure-VNet-1  \
+    --output table \
+    --query '{Name:name,ConnectionStatus:connectionStatus}'
+
+#************* The site-to-site configuration is now complete. ******************#  
